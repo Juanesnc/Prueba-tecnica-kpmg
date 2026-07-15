@@ -1,0 +1,538 @@
+openapi: 3.0.3
+info:
+  title: API — Sistema de Gestión de Tickets
+  version: 1.0.0
+  description: >
+    Contrato de API para el Sistema de Gestión de Tickets.
+    Basado en la especificación de endpoints de este archivo y en
+    user-stories-refined.md, work-plan.md y ai-workflow.md.
+
+    Reglas de negocio:
+      - RN-01: un `user` no puede reducir la prioridad de un ticket (solo mantener/aumentar).
+               El `admin` SÍ puede reducirla (exento).
+      - RN-02: solo un `admin` puede eliminar tickets (soft delete).
+      - RN-03: el historial de cambios es inmutable (solo lectura vía API).
+
+servers:
+  - url: /api
+    description: Base path de la API
+
+tags:
+  - name: Auth
+    description: Autenticación y registro
+  - name: Tickets
+    description: Gestión de tickets (CRUD)
+  - name: Historial
+    description: Historial de cambios (inmutable)
+  - name: Reportes
+    description: Resumen estadístico
+
+security:
+  - bearerAuth: []
+
+paths:
+  # ------------------------------------------------------------------ Auth
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Registro de usuario
+      description: >
+        Registra un usuario. Valida correo válido y no repetido, y que
+        `password` coincida con `passwordConfirm`. Todos los campos son
+        obligatorios. El rol asignado por defecto es `user`.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: Usuario creado; devuelve JWT y rol, permite el ingreso.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '409':
+          description: El correo ya está registrado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Login, retorna JWT
+      description: >
+        Autentica por correo y contraseña. Correo válido y campos obligatorios.
+        En caso de error se niega el ingreso con mensaje al usuario.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Ingreso correcto; devuelve JWT
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '401':
+          description: Credenciales inválidas o usuario inactivo (mensaje genérico)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  # --------------------------------------------------------------- Tickets
+  /tickets:
+    get:
+      tags: [Tickets]
+      summary: Listar tickets (filtros + paginación)
+      description: Lista los tickets del sistema que no tienen soft delete.
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/TicketStatus'
+        - name: priority
+          in: query
+          schema:
+            $ref: '#/components/schemas/TicketPriority'
+        - name: user_id
+          in: query
+          description: Filtrar por usuario asignado
+          schema:
+            type: integer
+        - name: search
+          in: query
+          description: Búsqueda por título
+          schema:
+            type: string
+        - name: sortBy
+          in: query
+          schema:
+            type: string
+            enum: [title, priority, status, user_id, created_at]
+        - name: order
+          in: query
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: asc
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: pageSize
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: Página de tickets (excluye soft-deleted)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TicketPage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Tickets]
+      summary: Crear ticket
+      description: >
+        Crea un nuevo ticket. Si no se envía `status`, inicia en `abierto`.
+        La creación registra una entrada en el historial (RN-03).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TicketCreate'
+      responses:
+        '201':
+          description: Ticket creado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ticket'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /tickets/{id}:
+    parameters:
+      - $ref: '#/components/parameters/TicketId'
+    get:
+      tags: [Tickets]
+      summary: Obtener ticket por ID
+      responses:
+        '200':
+          description: Ticket encontrado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ticket'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Tickets]
+      summary: Actualizar ticket
+      description: >
+        Actualiza los campos de un ticket ya creado (campos opcionales).
+        RN-01: un `user` no puede reducir la prioridad; el `admin` sí puede.
+        Todo cambio de prioridad/estado genera una entrada en el historial (RN-03).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TicketUpdate'
+      responses:
+        '200':
+          description: Ticket actualizado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ticket'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: RN-01 — un `user` intentó reducir la prioridad
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    delete:
+      tags: [Tickets]
+      summary: Eliminar ticket (solo admin)
+      description: 'RN-02: solo un `admin` puede eliminar (soft delete). El historial se conserva.'
+      responses:
+        '204':
+          description: Ticket eliminado (soft delete)
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: RN-02 — el usuario no es `admin`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ------------------------------------------------------------- Historial
+  /tickets/{id}/history:
+    parameters:
+      - $ref: '#/components/parameters/TicketId'
+    get:
+      tags: [Historial]
+      summary: Historial de cambios
+      description: >
+        Visualiza los cambios del ticket seleccionado.
+        RN-03: el historial es inmutable; la API solo expone lectura.
+      responses:
+        '200':
+          description: Lista de entradas de historial (orden cronológico)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/HistoryLog'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # -------------------------------------------------------------- Reportes
+  /tickets/stats:
+    get:
+      tags: [Reportes]
+      summary: Resumen estadístico
+      description: >
+        Resumen estadístico de los tickets por prioridad y por estado,
+        excluyendo los que tienen soft delete.
+      responses:
+        '200':
+          description: Resumen estadístico
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TicketStats'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    TicketId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+
+  responses:
+    Unauthorized:
+      description: Token ausente o inválido
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Recurso no encontrado
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ValidationError:
+      description: Error de validación (campos o enums inválidos)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ValidationErrorBody'
+
+  schemas:
+    # ---- Enums
+    RoleName:
+      type: string
+      enum: [admin, user]
+    TicketPriority:
+      type: string
+      enum: [baja, media, alta, critica]
+      description: Orden ascendente baja < media < alta < critica
+    TicketStatus:
+      type: string
+      enum: [abierto, en_progreso, resuelto, cerrado]
+
+    # ---- Auth
+    RegisterRequest:
+      type: object
+      required: [name, email, password, passwordConfirm]
+      properties:
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+          minLength: 8
+        passwordConfirm:
+          type: string
+          format: password
+          description: Debe coincidir con `password`.
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+    AuthResponse:
+      type: object
+      properties:
+        token:
+          type: string
+          description: JWT
+        user:
+          $ref: '#/components/schemas/User'
+
+    # ---- Entidades
+    Role:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          $ref: '#/components/schemas/RoleName'
+    User:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        role_id:
+          type: integer
+        role:
+          $ref: '#/components/schemas/RoleName'
+      # La contraseña nunca se expone en las respuestas.
+
+    Ticket:
+      type: object
+      properties:
+        id:
+          type: integer
+        title:
+          type: string
+        description:
+          type: string
+        priority:
+          $ref: '#/components/schemas/TicketPriority'
+        status:
+          $ref: '#/components/schemas/TicketStatus'
+        user_id:
+          type: integer
+          nullable: true
+          description: Usuario asignado
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    TicketCreate:
+      type: object
+      required: [title, description, priority, user_id]
+      properties:
+        title:
+          type: string
+        description:
+          type: string
+        priority:
+          $ref: '#/components/schemas/TicketPriority'
+        status:
+          $ref: '#/components/schemas/TicketStatus'
+          description: Opcional. Si se omite, inicia en `abierto`.
+        user_id:
+          type: integer
+    TicketUpdate:
+      type: object
+      minProperties: 1
+      description: Todos los campos son opcionales; se actualiza lo enviado.
+      properties:
+        title:
+          type: string
+        description:
+          type: string
+        priority:
+          $ref: '#/components/schemas/TicketPriority'
+        status:
+          $ref: '#/components/schemas/TicketStatus'
+        user_id:
+          type: integer
+    TicketPage:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Ticket'
+        page:
+          type: integer
+        pageSize:
+          type: integer
+        total:
+          type: integer
+        totalPages:
+          type: integer
+
+    # ---- Historial (inmutable, RN-03)
+    HistoryLog:
+      type: object
+      properties:
+        id:
+          type: integer
+        ticket_id:
+          type: integer
+        date:
+          type: string
+          format: date-time
+          description: Fecha y hora del cambio
+        priority:
+          allOf:
+            - $ref: '#/components/schemas/TicketPriority'
+          nullable: true
+          description: Valor de prioridad tras el cambio (si aplica)
+        status:
+          allOf:
+            - $ref: '#/components/schemas/TicketStatus'
+          nullable: true
+          description: Valor de estado tras el cambio (si aplica)
+        user_id:
+          type: integer
+          description: Usuario que realizó el cambio
+
+    # ---- Reportes
+    TicketStats:
+      type: object
+      properties:
+        byStatus:
+          type: object
+          additionalProperties:
+            type: integer
+          example:
+            abierto: 12
+            en_progreso: 5
+            resuelto: 8
+            cerrado: 20
+        byPriority:
+          type: object
+          additionalProperties:
+            type: integer
+          example:
+            baja: 10
+            media: 15
+            alta: 12
+            critica: 8
+        total:
+          type: integer
+
+    # ---- Errores
+    Error:
+      type: object
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+    ValidationErrorBody:
+      type: object
+      properties:
+        code:
+          type: string
+          example: VALIDATION_ERROR
+        message:
+          type: string
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              message:
+                type: string
